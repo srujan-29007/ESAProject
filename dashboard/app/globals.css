@@ -8,8 +8,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-plex-sans);
+  --font-mono: var(--font-plex-mono);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -19,8 +19,65 @@
   }
 }
 
+html { color-scheme: light; }
+
 body {
-  background: var(--background);
+  background: #f3f5f8;
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Dashboard animations (global so every component can use them). */
+@keyframes cardIn { 0% { opacity: 0; transform: translateY(12px) scale(0.98); } 100% { opacity: 1; transform: none; } }
+.card-in { animation: cardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1); }
+
+@keyframes ringOut { 0% { transform: scale(0.6); opacity: 0.9; } 100% { transform: scale(1.25); opacity: 0; } }
+.ring-out { animation: ringOut 1.4s ease-out forwards; opacity: 0; }
+
+@keyframes idleRing { 0% { transform: scale(0.55); opacity: 0.8; } 100% { transform: scale(1.15); opacity: 0; } }
+.idle-ring { animation: idleRing 2s ease-out infinite; }
+
+@keyframes logIn { 0% { opacity: 0; transform: translateX(-10px); } 100% { opacity: 1; transform: none; } }
+.log-in { animation: logIn 0.45s ease-out; }
+
+@keyframes toastIn { 0% { opacity: 0; transform: translateY(-12px) scale(0.96); } 100% { opacity: 1; transform: none; } }
+.toast-in { animation: toastIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes toastBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+.toast-bar { animation: toastBar 4.5s linear forwards; transform-origin: left; }
+
+
+/* Instrument identification viewer. */
+@keyframes artIn { 0% { opacity: 0; transform: scale(0.96); filter: blur(3px); } 100% { opacity: 1; transform: none; filter: none; } }
+.art-in { animation: artIn 0.7s cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes scanBeam { 0% { left: -6rem; opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { left: 100%; opacity: 0; } }
+.scan-beam { animation: scanBeam 1.3s cubic-bezier(0.45, 0, 0.25, 1) forwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-beam, .art-in, .idle-ring { animation: none; }
+  .scan-beam { display: none; }
+}
+
+/* Surgery timeline: an instrument that is still out of the tray. */
+@keyframes toolOut { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+.tool-out { animation: toolOut 1.6s ease-in-out infinite; background-image: repeating-linear-gradient(45deg, rgba(255,255,255,0.18) 0 4px, transparent 4px 8px); }
+
+/* Background icons drift gently. */
+@keyframes floatDrift { 0%, 100% { transform: translate(0, 0) rotate(0deg); } 50% { transform: translate(6px, -14px) rotate(5deg); } }
+.float-drift { animation: floatDrift 16s ease-in-out infinite; }
+
+/* Medical cursor (mouse users only; enabled from JS). */
+.medical-cursor, .medical-cursor * { cursor: none !important; }
+.medical-cursor input, .medical-cursor textarea, .medical-cursor [contenteditable="true"] { cursor: text !important; }
+.cursor-dot, .cursor-ring { position: fixed; left: 0; top: 0; pointer-events: none; z-index: 9999; opacity: 0; transition: opacity 0.2s; }
+.cursor-dot { width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 9999px; background: #1d4ed8; }
+.cursor-ring-circle {
+  position: absolute; left: -15px; top: -15px; width: 30px; height: 30px; border-radius: 9999px;
+  border: 1.5px solid rgba(29, 78, 216, 0.55); display: flex; align-items: center; justify-content: center;
+  transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+}
+.cursor-cross { width: 12px; height: 12px; fill: #1d4ed8; opacity: 0; transition: opacity 0.18s ease; }
+.cursor-ring[data-hot="1"] .cursor-ring-circle { transform: scale(1.45); background: rgba(29, 78, 216, 0.08); border-color: #1d4ed8; }
+.cursor-ring[data-hot="1"] .cursor-cross { opacity: 1; }
+.cursor-ring[data-down="1"] .cursor-ring-circle { transform: scale(0.8); }
+@media (pointer: coarse) { .cursor-dot, .cursor-ring { display: none; } }
+@media (prefers-reduced-motion: reduce) { .float-drift { animation: none; } }

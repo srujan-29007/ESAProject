@@ -1,3 +1,5 @@
+// RFID scan backend — bridges the ESP32's MQTT publishes to the live
+// dashboard over Socket.io, and persists a name + scan history per tag.
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -6,133 +8,155 @@ const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 const app = express();
-const httpServer = http.createServer(app);
-
-const io = new Server(httpServer, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+app.use(express.json());
+// The dashboard runs on a different port, so allow it to call the REST API.
+app.use((req, res, next) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, PATCH, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
 });
 
-// --- RESTORED MQTT CONNECTION SETUP ---
-const mqttClient = mqtt.connect('mqtt://broker.hivemq.com:1883');
-const UNIQUE_TOPIC = 'smart_tray_25BCE2885/rfid';
+const httpServer = http.createServer(app);
+const io = new Server(httpServer, {
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+});
+
+const MQTT_BROKER = 'mqtt://broker.hivemq.com:1883';
+const MQTT_TOPIC = 'smart_tray_25BCE2885/rfid';
+// ESP32 heartbeat: WiFi signal, uptime, reader health, offline-queue size.
+const STATUS_TOPIC = 'smart_tray_25BCE2885/status';
+
+// Latest heartbeat from the scanner (null until the first one arrives).
+let device = null;
+
+const mqttClient = mqtt.connect(MQTT_BROKER);
 
 mqttClient.on('connect', () => {
-  console.log('Server connected to Cloud MQTT Broker!');
-  mqttClient.subscribe(UNIQUE_TOPIC);
-});
-// --------------------------------------
-
-// Keep track of the active surgery in memory
-let activeSessionId = null; 
-
-io.on('connection', async (socket) => {
-  console.log('Frontend dashboard connected via WebSocket');
-  
-  try {
-    const allInstruments = await prisma.instrument.findMany();
-    socket.emit('initial_state', allInstruments);
-
-    // Check if there is already a surgery running in case the server restarted
-    const ongoingSession = await prisma.surgerySession.findFirst({ where: { isActive: true } });
-    if (ongoingSession) {
-      activeSessionId = ongoingSession.id;
-      socket.emit('session_active', true);
-      
-      // Load only the logs for THIS active session
-      const sessionLogs = await prisma.eventLog.findMany({
-        where: { sessionId: activeSessionId },
-        orderBy: { createdAt: 'desc' },
-        include: { instrument: true }
-      });
-      socket.emit('initial_logs', sessionLogs.map(formatLog));
-    }
-  } catch (error) { console.log(error); }
-
-  // Handle Surgery Start
-  socket.on('start_surgery', async () => {
-    const newSession = await prisma.surgerySession.create({
-      data: { isActive: true }
-    });
-    activeSessionId = newSession.id;
-    io.emit('session_active', true);
-    console.log(`Surgery Session ${activeSessionId} Started!`);
-  });
-
-  // Handle Surgery End
-  socket.on('end_surgery', async () => {
-    if (activeSessionId) {
-      await prisma.surgerySession.update({
-        where: { id: activeSessionId },
-        data: { isActive: false, endTime: new Date() }
-      });
-      console.log(`Surgery Session ${activeSessionId} Ended & Sealed.`);
-      activeSessionId = null;
-      io.emit('session_active', false);
-    }
-  });
-  socket.on('fetch_past_sessions', async () => {
-    try {
-      const pastSessions = await prisma.surgerySession.findMany({
-        where: { isActive: false },
-        orderBy: { endTime: 'desc' },
-        take: 10, // Grab the 10 most recent sessions
-        include: { 
-          logs: { 
-            include: { instrument: true },
-            orderBy: { createdAt: 'desc' }
-          } 
-        }
-      });
-      socket.emit('past_sessions_data', pastSessions);
-    } catch (error) {
-      console.log("Error fetching past sessions:", error);
-    }
-  });
+  console.log('Connected to MQTT broker, subscribing to', MQTT_TOPIC);
+  mqttClient.subscribe([MQTT_TOPIC, STATUS_TOPIC]);
 });
 
-// Helper function to format logs for the frontend
-function formatLog(log) {
-  return { id: log.id, time: new Date(log.createdAt).toLocaleTimeString(), name: log.instrument.name, action: log.action };
-}
+mqttClient.on('error', (err) => console.error('MQTT error:', err.message));
 
-// Handle Incoming MQTT Messages
 mqttClient.on('message', async (topic, message) => {
-  if (topic === UNIQUE_TOPIC) {
-    try {
-      const data = JSON.parse(message.toString());
-      const instrument = await prisma.instrument.findUnique({ where: { rfidUid: data.rfidUid } });
+  if (topic !== MQTT_TOPIC && topic !== STATUS_TOPIC) return;
 
-      if (instrument) {
-        const isNowPresent = data.action === 'returned';
-        if (instrument.isPresent === isNowPresent) return; // Ignore duplicates
+  let data;
+  try {
+    data = JSON.parse(message.toString());
+  } catch {
+    console.error('Bad MQTT payload:', message.toString());
+    return;
+  }
 
-        await prisma.instrument.update({
-          where: { rfidUid: data.rfidUid },
-          data: { isPresent: isNowPresent }
-        });
+  if (topic === STATUS_TOPIC) {
+    // `online: false` is the broker-delivered last will when the ESP32 drops off.
+    device = { ...data, online: data.online !== false, receivedAt: Date.now() };
+    io.emit('device', device);
+    return;
+  }
 
-        // TIE THE LOG TO THE ACTIVE SESSION
-        const newLog = await prisma.eventLog.create({
-          data: { 
-            action: data.action, 
-            instrumentId: instrument.id,
-            sessionId: activeSessionId // This will be null if no surgery is running
-          }
-        });
+  const rfidUid = data.rfidUid;
+  if (!rfidUid) return;
 
-        io.emit('tray_update', {
-          rfidUid: data.rfidUid,
-          action: data.action,
-          instrumentName: instrument.name,
-          isPresent: isNowPresent,
-          logId: newLog.id
-        });
-      }
-    } catch (error) { console.log(error); }
+  // Scans queued on the ESP32 while it was offline carry how long ago they
+  // happened, so they're stored at their real time rather than arrival time.
+  const ageMs = Number(data.ageMs) || 0;
+  const delayed = ageMs > 3000 && ageMs < 7 * 24 * 3600 * 1000;
+  const scannedAt = delayed ? new Date(Date.now() - ageMs) : new Date();
+
+  try {
+    // Auto-register any tag we haven't seen before, so every tap shows up
+    // live even if nobody's named it yet.
+    let tag = await prisma.tag.findUnique({ where: { rfidUid } });
+    if (!tag) {
+      tag = await prisma.tag.create({ data: { rfidUid, name: `Tag ${rfidUid}` } });
+    }
+
+    const scan = await prisma.scan.create({ data: { tagId: tag.id, createdAt: scannedAt } });
+    if (delayed) console.log(`Late scan ${rfidUid} from ${Math.round(ageMs / 1000)}s ago (was queued offline)`);
+
+    io.emit('scan', {
+      rfidUid: tag.rfidUid,
+      name: tag.name,
+      scanId: scan.id,
+      time: scan.createdAt,
+      delayed,
+    });
+  } catch (err) {
+    console.error('Error processing scan:', err);
   }
 });
 
-const HTTP_PORT = process.env.PORT || 5000;
-httpServer.listen(HTTP_PORT, () => {
-  console.log(`HTTP/WebSocket server is running on port ${HTTP_PORT}`);
+// --- REST API ---
+
+// List all known tags.
+app.get('/api/tags', async (_req, res) => {
+  const tags = await prisma.tag.findMany({ orderBy: { createdAt: 'asc' } });
+  res.json(tags);
+});
+
+// Rename a tag (creates it if it doesn't exist yet).
+app.patch('/api/tags/:rfidUid', async (req, res) => {
+  const { rfidUid } = req.params;
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  if (!name || name.length > 40) {
+    return res.status(400).json({ error: 'name is required (max 40 chars)' });
+  }
+  const tag = await prisma.tag.upsert({
+    where: { rfidUid },
+    update: { name },
+    create: { rfidUid, name },
+  });
+  io.emit('tag', tag);
+  res.json(tag);
+});
+
+// Recent scan history.
+app.get('/api/scans', async (_req, res) => {
+  const scans = await prisma.scan.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+    include: { tag: true },
+  });
+  res.json(scans.map((s) => ({
+    scanId: s.id,
+    rfidUid: s.tag.rfidUid,
+    name: s.tag.name,
+    time: s.createdAt,
+  })));
+});
+
+// Scan count per tag, optionally only since a given time (?since=ISO date).
+app.get('/api/usage', async (req, res) => {
+  const since = req.query.since ? new Date(req.query.since) : null;
+  if (since && isNaN(since)) return res.status(400).json({ error: 'bad since' });
+  const groups = await prisma.scan.groupBy({
+    by: ['tagId'],
+    where: since ? { createdAt: { gte: since } } : undefined,
+    _count: { _all: true },
+  });
+  const tags = await prisma.tag.findMany({ where: { id: { in: groups.map((g) => g.tagId) } } });
+  const byId = new Map(tags.map((t) => [t.id, t]));
+  res.json(groups.map((g) => ({
+    rfidUid: byId.get(g.tagId).rfidUid,
+    name: byId.get(g.tagId).name,
+    count: g._count._all,
+  })));
+});
+
+// Latest scanner heartbeat.
+app.get('/api/device', (_req, res) => res.json(device));
+
+io.on('connection', (socket) => {
+  console.log('Dashboard connected:', socket.id);
+  if (device) socket.emit('device', device);
+  socket.on('disconnect', () => console.log('Dashboard disconnected:', socket.id));
+});
+
+const PORT = process.env.PORT || 5000;
+httpServer.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
 });

@@ -7,32 +7,20 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Maps physical RFID tags to instrument names
-model Instrument {
-  id        Int        @id @default(autoincrement())
-  rfidUid   String     @unique
+// Maps a physical RFID tag's UID to a human-readable name.
+// Auto-created on first scan; renamed via PATCH /api/tags/:rfidUid.
+model Tag {
+  id        Int      @id @default(autoincrement())
+  rfidUid   String   @unique
   name      String
-  isPresent Boolean    @default(true) 
-  logs      EventLog[]
+  createdAt DateTime @default(now())
+  scans     Scan[]
 }
 
-// Stores the time-stamped history of every pick-up and return
-model EventLog {
-  id           Int             @id @default(autoincrement())
-  action       String
-  createdAt    DateTime        @default(now())
-  instrumentId Int
-  instrument   Instrument      @relation(fields: [instrumentId], references: [id])
-  
-  // New relation tying this log to a specific surgery
-  sessionId    Int?            
-  session      SurgerySession? @relation(fields: [sessionId], references: [id])
-}
-
-model SurgerySession {
-  id        Int        @id @default(autoincrement())
-  startTime DateTime   @default(now())
-  endTime   DateTime?
-  isActive  Boolean    @default(true)
-  logs      EventLog[] // Links to the logs
+// One row per tap, for history.
+model Scan {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  tagId     Int
+  tag       Tag      @relation(fields: [tagId], references: [id])
 }
